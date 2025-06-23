@@ -7,6 +7,8 @@ const cheerio = require('cheerio');
 const fs = require('fs');
 const path = require('path');
 const urlModule = require('url');
+const mongoose = require('mongoose');
+const GitLabData = require('../models/GitLabData');
 
 const router = express.Router();
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
@@ -57,22 +59,22 @@ async function scrapeGitLabData() {
     logger.info('Starting GitLab data scraping...');
     const handbookData = await scrapeSite(GITLAB_SOURCES.handbook);
     const directionData = await scrapeSite(GITLAB_SOURCES.direction);
+
+    // Store in DB instead of memory/file
+    await GitLabData.findOneAndUpdate(
+      { source: 'handbook' },
+      { content: JSON.stringify(handbookData), scrapedAt: new Date() },
+      { upsert: true, new: true }
+    );
+    await GitLabData.findOneAndUpdate(
+      { source: 'direction' },
+      { content: JSON.stringify(directionData), scrapedAt: new Date() },
+      { upsert: true, new: true }
+    );
     
-    gitlabDataCache = {
-      handbook: handbookData,
-      direction: directionData,
-      lastUpdated: new Date().toISOString()
-    };
+    logger.info(`Scraping completed and data stored/updated in MongoDB.`);
     
-    logger.info(`Scraping completed. Handbook: ${handbookData.pages.length} pages, Direction: ${directionData.pages.length} pages`);
-    
-    try {
-      fs.writeFileSync(path.join(__dirname, 'gitlab_cache.json'), JSON.stringify(gitlabDataCache, null, 2));
-      logger.info('Cache written to gitlab_cache.json');
-    } catch (fileErr) {
-      logger.error('Error writing cache file:', fileErr);
-    }
-    return gitlabDataCache;
+    // We no longer return the data directly, as it's now in the DB.
   } catch (error) {
     logger.error('Error in scrapeGitLabData:', error);
     throw error;
@@ -99,16 +101,6 @@ async function backgroundRefresh() {
     refreshStatus.lastRefreshError = error.message;
   } finally {
     refreshStatus.isRefreshing = false;
-  }
-}
-
-// Load existing cache if available
-if (fs.existsSync(path.join(__dirname, 'gitlab_cache.json'))) {
-  try {
-    gitlabDataCache = JSON.parse(fs.readFileSync(path.join(__dirname, 'gitlab_cache.json'), 'utf8'));
-    logger.info('Loaded existing cache from gitlab_cache.json');
-  } catch (error) {
-    logger.error('Error loading cache file:', error);
   }
 }
 
@@ -196,20 +188,28 @@ async function scrapeSite(rootUrl, maxPages = 100) {
 }
 
 async function getGitLabData() {
+  const handbookDoc = await GitLabData.findOne({ source: 'handbook' });
+  const directionDoc = await GitLabData.findOne({ source: 'direction' });
+
+  const cacheFromDB = {
+    handbook: handbookDoc ? JSON.parse(handbookDoc.content) : null,
+    direction: directionDoc ? JSON.parse(directionDoc.content) : null,
+    lastUpdated: handbookDoc ? handbookDoc.scrapedAt : null,
+  };
+
   const now = new Date();
-  const age = gitlabDataCache.lastUpdated ? now - new Date(gitlabDataCache.lastUpdated) : Infinity;
+  const age = cacheFromDB.lastUpdated ? now - new Date(cacheFromDB.lastUpdated) : Infinity;
   
   // Check if we need to refresh (but don't block)
-  if (age > 3600000 || !gitlabDataCache.handbook || gitlabDataCache.handbook.pages.length === 0) {
-    logger.info('Cache needs refresh, triggering background refresh...');
-    // Start background refresh without waiting
+  if (age > 3600000 || !cacheFromDB.handbook) {
+    logger.info('Cache from DB is stale or missing, triggering background refresh...');
     backgroundRefresh().catch(err => {
       logger.error('Background refresh failed:', err);
     });
   }
   
-  // Return current cache immediately (even if stale)
-  return gitlabDataCache;
+  // Return data from DB
+  return cacheFromDB;
 }
 
 async function generateResponse(userMessage, context, improvementRequest = null) {
@@ -368,6 +368,7 @@ router.get('/health', async (req, res) => {
     const data = await getGitLabData();
     res.json({
       status: 'healthy',
+      database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
       geminiApi: genAI ? 'configured' : 'missing',
       gitlabData: {
         handbook: data.handbook ? 'available' : 'unavailable',
@@ -406,7 +407,10 @@ router.post('/refresh-data', async (req, res) => {
   }
 });
 
-module.exports = router;
+module.exports = {
+  router,
+  backgroundRefresh
+};
 
 // Export for testing
 module.exports.scrapeGitLabData = scrapeGitLabData;

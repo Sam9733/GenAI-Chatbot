@@ -34,7 +34,10 @@ function App() {
   };
 
   useEffect(() => {
-    scrollToBottom();
+    // Only scroll to bottom if there are messages
+    if (messages.length > 0) {
+      scrollToBottom();
+    }
   }, [messages]);
 
   // Check system health on component mount
