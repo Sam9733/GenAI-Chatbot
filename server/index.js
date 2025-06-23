@@ -3,6 +3,17 @@ const cors = require('cors');
 const path = require('path');
 const connectDB = require('./config/database');
 
+// Allow CORS for Netlify frontend and localhost
+const allowedOrigins = [
+  'https://gitlab-genai-chatbot.netlify.app',
+  'http://localhost:3000'
+];
+
+const corsOptions = {
+  origin: allowedOrigins,
+  credentials: true
+};
+
 // Connect to MongoDB
 connectDB();
 
@@ -22,7 +33,7 @@ const logger = {
 };
 
 // Middleware
-app.use(cors());
+app.use(cors(corsOptions));
 app.use(express.json({ limit: '10mb' })); // Add size limit
 
 // Import routes
