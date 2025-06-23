@@ -43,28 +43,168 @@ let refreshStatus = {
 async function scrapeGitLabData() {
   try {
     logger.info('Starting GitLab data scraping...');
-    const handbookData = await scrapeSite(GITLAB_SOURCES.handbook);
-    const directionData = await scrapeSite(GITLAB_SOURCES.direction);
-
-    // Store in DB instead of memory/file
-    await GitLabData.findOneAndUpdate(
-      { source: 'handbook' },
-      { content: JSON.stringify(handbookData), scrapedAt: new Date() },
-      { upsert: true, new: true }
-    );
-    await GitLabData.findOneAndUpdate(
-      { source: 'direction' },
-      { content: JSON.stringify(directionData), scrapedAt: new Date() },
-      { upsert: true, new: true }
-    );
     
-    logger.info(`Scraping completed and data stored/updated in MongoDB.`);
+    // Clear existing data before starting new scrape
+    logger.info('Clearing existing data from database...');
+    await GitLabData.updateMany(
+      { source: { $in: ['handbook', 'direction'] } },
+      { $set: { content: JSON.stringify({ title: '', url: '', pages: [] }) } }
+    );
+    logger.info('Existing data cleared successfully.');
     
-    // We no longer return the data directly, as it's now in the DB.
+    await scrapeAndSaveSite(GITLAB_SOURCES.handbook, 'handbook');
+    await scrapeAndSaveSite(GITLAB_SOURCES.direction, 'direction');
+    logger.info('Scraping completed for all sites.');
   } catch (error) {
     logger.error('Error in scrapeGitLabData:', error);
     throw error;
   }
+}
+
+async function scrapeAndSaveSite(rootUrl, source, maxPages = 200, batchSize = 10) {
+  logger.info(`Starting to scrape: ${rootUrl} (max ${maxPages} pages)`);
+  const visitedUrls = new Set();
+  const queue = [rootUrl];
+  let currentBatch = [];
+  let totalPagesSaved = 0;
+
+  // Initialize empty document for this source
+  await GitLabData.findOneAndUpdate(
+    { source },
+    { 
+      content: JSON.stringify({ title: '', url: rootUrl, pages: [] }),
+      scrapedAt: new Date()
+    },
+    { upsert: true }
+  );
+
+  while (queue.length > 0 && totalPagesSaved < maxPages) {
+    const url = queue.shift();
+    if (visitedUrls.has(url)) {
+      continue;
+    }
+    visitedUrls.add(url);
+
+    let response = null;
+    let attempt = 0;
+    let success = false;
+    while (attempt < 3 && !success) {
+      try {
+        await sleep(1000 + Math.random() * 1000); // Wait 1-2 seconds
+        response = await axios.get(url, {
+          timeout: 15000,
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+          }
+        });
+        success = true;
+      } catch (e) {
+        attempt++;
+        const isHangup = e.code === 'ECONNRESET' || (e.message && e.message.includes('socket hang up'));
+        const isNetwork = e.code === 'ECONNABORTED' || e.code === 'ENOTFOUND' || e.code === 'EAI_AGAIN';
+        if ((isHangup || isNetwork) && attempt < 3) {
+          logger.warn(`Retrying (${attempt}/3) for ${url} due to network error: ${e.message}`);
+          await sleep(1500 * attempt); // Exponential backoff
+        } else {
+          logger.warn(`Error scraping ${url}: ${e.message}`);
+          break;
+        }
+      }
+    }
+    if (!success) continue;
+
+    const $ = cheerio.load(response.data);
+    $('script, style, nav, footer, header').remove();
+    const text = $('body').text().trim().replace(/\s+/g, ' ');
+    const title = $('title').text().trim() || $('h1').first().text().trim() || 'Untitled';
+    
+    if (text.length > 100) {
+      currentBatch.push({ 
+        url, 
+        title, 
+        text: text.substring(0, 5000) // Limit text length to avoid huge cache files
+      });
+
+      // Save batch if we've reached batchSize or this is the last page
+      if (currentBatch.length >= batchSize || totalPagesSaved + currentBatch.length >= maxPages) {
+        try {
+          // Get existing data
+          const existingDoc = await GitLabData.findOne({ source });
+          let existingData;
+          try {
+            existingData = existingDoc && existingDoc.content ? JSON.parse(existingDoc.content) : { title: '', url: rootUrl, pages: [] };
+          } catch (e) {
+            logger.warn(`Invalid JSON in existing content for ${source}, starting fresh`);
+            existingData = { title: '', url: rootUrl, pages: [] };
+          }
+          
+          // Append new batch to existing pages
+          existingData.pages = [...existingData.pages, ...currentBatch];
+          
+          // Save updated data
+          await GitLabData.findOneAndUpdate(
+            { source },
+            { 
+              content: JSON.stringify(existingData),
+              scrapedAt: new Date()
+            },
+            { upsert: true }
+          );
+
+          totalPagesSaved += currentBatch.length;
+          logger.info(`Saved batch of ${currentBatch.length} pages for ${source}. Total pages: ${totalPagesSaved}`);
+          currentBatch = []; // Clear the batch
+        } catch (error) {
+          logger.error(`Error saving batch for ${source}:`, error);
+          throw error;
+        }
+      }
+    }
+
+    if (totalPagesSaved < maxPages) {
+      const newLinks = [];
+      $('a[href]').each((i, el) => {
+        const href = $(el).attr('href');
+        if (href && !href.startsWith('mailto') && !href.startsWith('#') && !href.startsWith('javascript:')) {
+          try {
+            const absoluteUrl = urlModule.resolve(url, href);
+            if (absoluteUrl.startsWith(rootUrl) && !visitedUrls.has(absoluteUrl)) {
+              newLinks.push(absoluteUrl);
+            }
+          } catch (e) {
+            // Skip invalid URLs
+          }
+        }
+      });
+      queue.push(...newLinks.slice(0, 5));
+    }
+  }
+
+  // Save any remaining pages in the last batch
+  if (currentBatch.length > 0) {
+    try {
+      const existingDoc = await GitLabData.findOne({ source });
+      const existingData = existingDoc ? JSON.parse(existingDoc.content) : { title: '', url: rootUrl, pages: [] };
+      existingData.pages = [...existingData.pages, ...currentBatch];
+      
+      await GitLabData.findOneAndUpdate(
+        { source },
+        { 
+          content: JSON.stringify(existingData),
+          scrapedAt: new Date()
+        },
+        { upsert: true }
+      );
+
+      totalPagesSaved += currentBatch.length;
+      logger.info(`Saved final batch of ${currentBatch.length} pages for ${source}. Total pages: ${totalPagesSaved}`);
+    } catch (error) {
+      logger.error(`Error saving final batch for ${source}:`, error);
+      throw error;
+    }
+  }
+
+  logger.info(`Finished scraping ${rootUrl}. Total pages saved: ${totalPagesSaved}`);
 }
 
 // Background refresh function
@@ -92,86 +232,6 @@ async function backgroundRefresh() {
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-async function scrapeSite(rootUrl, maxPages = 100) {
-  logger.info(`Starting to scrape: ${rootUrl} (max ${maxPages} pages)`);
-  const visitedUrls = new Set();
-  const queue = [rootUrl];
-  const data = {
-    title: '',
-    url: rootUrl,
-    pages: []
-  };
-
-  while (queue.length > 0 && data.pages.length < maxPages) {
-    const url = queue.shift();
-    if (visitedUrls.has(url)) {
-      continue;
-    }
-    visitedUrls.add(url);
-
-    let response = null;
-    let attempt = 0;
-    let success = false;
-    while (attempt < 3 && !success) {
-      try {
-        await sleep(1000 + Math.random() * 1000); // Wait 1-2 seconds
-        response = await axios.get(url, {
-          timeout: 15000,
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-          }
-        });
-        success = true;
-      } catch (e) {
-        attempt++;
-        // Retry only for socket hang up or network errors
-        const isHangup = e.code === 'ECONNRESET' || (e.message && e.message.includes('socket hang up'));
-        const isNetwork = e.code === 'ECONNABORTED' || e.code === 'ENOTFOUND' || e.code === 'EAI_AGAIN';
-        if ((isHangup || isNetwork) && attempt < 3) {
-          logger.warn(`Retrying (${attempt}/3) for ${url} due to network error: ${e.message}`);
-          await sleep(1500 * attempt); // Exponential backoff
-        } else {
-          logger.warn(`Error scraping ${url}: ${e.message}`);
-          break;
-        }
-      }
-    }
-    if (!success) continue;
-
-    const $ = cheerio.load(response.data);
-    $('script, style, nav, footer, header').remove();
-    const text = $('body').text().trim().replace(/\s+/g, ' ');
-    const title = $('title').text().trim() || $('h1').first().text().trim() || 'Untitled';
-    if (text.length > 100) {
-      data.pages.push({ 
-        url, 
-        title, 
-        text: text.substring(0, 5000) // Limit text length to avoid huge cache files
-      });
-    }
-    if (data.pages.length < maxPages) {
-      const newLinks = [];
-      $('a[href]').each((i, el) => {
-        const href = $(el).attr('href');
-        if (href && !href.startsWith('mailto') && !href.startsWith('#') && !href.startsWith('javascript:')) {
-          try {
-            const absoluteUrl = urlModule.resolve(url, href);
-            if (absoluteUrl.startsWith(rootUrl) && !visitedUrls.has(absoluteUrl)) {
-              newLinks.push(absoluteUrl);
-            }
-          } catch (e) {
-            // Skip invalid URLs
-          }
-        }
-      });
-      queue.push(...newLinks.slice(0, 5));
-    }
-  }
-
-  logger.info(`Finished scraping ${rootUrl}. Total pages: ${data.pages.length}`);
-  return data;
-}
-
 async function getGitLabData() {
   const handbookDoc = await GitLabData.findOne({ source: 'handbook' });
   const directionDoc = await GitLabData.findOne({ source: 'direction' });
@@ -186,7 +246,7 @@ async function getGitLabData() {
   const age = dataFromDB.lastUpdated ? now - new Date(dataFromDB.lastUpdated) : Infinity;
   
   // Check if we need to refresh (but don't block)
-  if (age > 3600000 || !dataFromDB.handbook) {
+  if (age > 12*3600000 || !dataFromDB.handbook) {
     logger.info('Data from DB is stale or missing, triggering background refresh...');
     backgroundRefresh().catch(err => {
       logger.error('Background refresh failed:', err);
