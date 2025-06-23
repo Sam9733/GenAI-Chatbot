@@ -33,25 +33,11 @@ const GITLAB_SOURCES = {
   direction: 'https://about.gitlab.com/direction/'
 };
 
-let gitlabDataCache = {
-  handbook: null,
-  direction: null,
-  lastUpdated: null
-};
-
-// Add refresh status tracking
+// Add refresh status tracking - using MongoDB instead of memory
 let refreshStatus = {
   isRefreshing: false,
   lastRefreshAttempt: null,
   lastRefreshError: null
-};
-
-// Add conversation storage
-let lastConversation = {
-  userMessage: null,
-  botResponse: null,
-  timestamp: null,
-  context: null
 };
 
 async function scrapeGitLabData() {
@@ -190,25 +176,24 @@ async function getGitLabData() {
   const handbookDoc = await GitLabData.findOne({ source: 'handbook' });
   const directionDoc = await GitLabData.findOne({ source: 'direction' });
 
-  const cacheFromDB = {
+  const dataFromDB = {
     handbook: handbookDoc ? JSON.parse(handbookDoc.content) : null,
     direction: directionDoc ? JSON.parse(directionDoc.content) : null,
     lastUpdated: handbookDoc ? handbookDoc.scrapedAt : null,
   };
 
   const now = new Date();
-  const age = cacheFromDB.lastUpdated ? now - new Date(cacheFromDB.lastUpdated) : Infinity;
+  const age = dataFromDB.lastUpdated ? now - new Date(dataFromDB.lastUpdated) : Infinity;
   
   // Check if we need to refresh (but don't block)
-  if (age > 3600000 || !cacheFromDB.handbook) {
-    logger.info('Cache from DB is stale or missing, triggering background refresh...');
+  if (age > 3600000 || !dataFromDB.handbook) {
+    logger.info('Data from DB is stale or missing, triggering background refresh...');
     backgroundRefresh().catch(err => {
       logger.error('Background refresh failed:', err);
     });
   }
   
-  // Return data from DB
-  return cacheFromDB;
+  return dataFromDB;
 }
 
 async function generateResponse(userMessage, context, improvementRequest = null) {
@@ -286,13 +271,19 @@ router.post('/message', async (req, res) => {
     const context = await getGitLabData();
     const aiMessage = await generateResponse(message, context);
     
-    // Save the conversation
-    lastConversation = {
-      userMessage: message,
-      botResponse: aiMessage,
-      timestamp: new Date().toISOString(),
-      context: context
-    };
+    // Store conversation in MongoDB
+    await GitLabData.findOneAndUpdate(
+      { source: 'last_conversation' },
+      {
+        content: JSON.stringify({
+          userMessage: message,
+          botResponse: aiMessage,
+          timestamp: new Date().toISOString(),
+          context: context
+        })
+      },
+      { upsert: true }
+    );
     
     res.json({
       id: Date.now().toString(),
@@ -310,56 +301,24 @@ router.post('/message', async (req, res) => {
   }
 });
 
-// New endpoint for improving the last response
-router.post('/improve', async (req, res) => {
+// Endpoint to get the last conversation
+router.get('/last-conversation', async (req, res) => {
   try {
-    const { improvementRequest } = req.body;
+    const lastConversationDoc = await GitLabData.findOne({ source: 'last_conversation' });
     
-    if (!improvementRequest || typeof improvementRequest !== 'string') {
-      return res.status(400).json({ error: 'Improvement request is required and must be a string' });
+    if (!lastConversationDoc) {
+      return res.status(404).json({ error: 'No previous conversation found' });
     }
     
-    if (!lastConversation.userMessage || !lastConversation.botResponse) {
-      return res.status(400).json({ error: 'No previous conversation to improve' });
-    }
-    
-    const improvedResponse = await generateResponse(
-      lastConversation.userMessage, 
-      lastConversation.context, 
-      improvementRequest
-    );
-    
-    // Update the conversation with the improved response
-    lastConversation.botResponse = improvedResponse;
-    lastConversation.timestamp = new Date().toISOString();
-    
+    const conversation = JSON.parse(lastConversationDoc.content);
     res.json({
-      id: Date.now().toString(),
-      message: improvedResponse,
-      timestamp: new Date().toISOString(),
-      conversationId: Date.now().toString(),
-      sources: {
-        handbook: lastConversation.context.handbook ? GITLAB_SOURCES.handbook : null,
-        direction: lastConversation.context.direction ? GITLAB_SOURCES.direction : null,
-        lastUpdated: lastConversation.context.lastUpdated
-      }
+      userMessage: conversation.userMessage,
+      botResponse: conversation.botResponse,
+      timestamp: conversation.timestamp
     });
   } catch (err) {
-    res.status(500).json({ error: 'Failed to improve response', message: err.message });
+    res.status(500).json({ error: 'Failed to retrieve last conversation', message: err.message });
   }
-});
-
-// Endpoint to get the last conversation
-router.get('/last-conversation', (req, res) => {
-  if (!lastConversation.userMessage) {
-    return res.status(404).json({ error: 'No previous conversation found' });
-  }
-  
-  res.json({
-    userMessage: lastConversation.userMessage,
-    botResponse: lastConversation.botResponse,
-    timestamp: lastConversation.timestamp
-  });
 });
 
 router.get('/health', async (req, res) => {

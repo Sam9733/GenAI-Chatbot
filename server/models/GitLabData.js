@@ -5,7 +5,7 @@ const GitLabDataSchema = new mongoose.Schema({
     type: String,
     required: true,
     unique: true,
-    enum: ['handbook', 'direction']
+    enum: ['handbook', 'direction', 'last_conversation', 'refresh_status']
   },
   content: {
     type: String, // Storing as a JSON string
@@ -15,6 +15,18 @@ const GitLabDataSchema = new mongoose.Schema({
     type: Date,
     default: Date.now,
   },
+  isRefreshing: {
+    type: Boolean,
+    default: false
+  },
+  lastRefreshAttempt: {
+    type: Date,
+    default: null
+  },
+  lastRefreshError: {
+    type: String,
+    default: null
+  }
 });
 
 GitLabDataSchema.pre('save', function(next) {
