@@ -118,68 +118,67 @@ async function scrapeSite(rootUrl, maxPages = 100) {
 
   while (queue.length > 0 && data.pages.length < maxPages) {
     const url = queue.shift();
-    
     if (visitedUrls.has(url)) {
       continue;
     }
     visitedUrls.add(url);
 
-    try {
-      // Add delay to be respectful to the server
-      await sleep(1000 + Math.random() * 1000); // Wait 1-2 seconds
-      
-      // Only log every 10th page to reduce noise
-      if (data.pages.length % 10 === 0) {
-        logger.info(`Scraping progress: ${data.pages.length}/${maxPages} pages`);
-      }
-
-      const response = await axios.get(url, { 
-        timeout: 15000,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-      });
-      
-      const $ = cheerio.load(response.data);
-
-      // Remove script and style elements
-      $('script, style, nav, footer, header').remove();
-
-      const text = $('body').text().trim().replace(/\s+/g, ' ');
-      const title = $('title').text().trim() || $('h1').first().text().trim() || 'Untitled';
-
-      // Only add pages with meaningful content
-      if (text.length > 100) {
-        data.pages.push({ 
-          url, 
-          title, 
-          text: text.substring(0, 5000) // Limit text length to avoid huge cache files
-        });
-      }
-
-      // Find internal links for next iteration (but limit to avoid too many requests)
-      if (data.pages.length < maxPages) {
-        const newLinks = [];
-        $('a[href]').each((i, el) => {
-          const href = $(el).attr('href');
-          if (href && !href.startsWith('mailto') && !href.startsWith('#') && !href.startsWith('javascript:')) {
-            try {
-              const absoluteUrl = urlModule.resolve(url, href);
-              if (absoluteUrl.startsWith(rootUrl) && !visitedUrls.has(absoluteUrl)) {
-                newLinks.push(absoluteUrl);
-              }
-            } catch (e) {
-              // Skip invalid URLs
-            }
+    let response = null;
+    let attempt = 0;
+    let success = false;
+    while (attempt < 3 && !success) {
+      try {
+        await sleep(1000 + Math.random() * 1000); // Wait 1-2 seconds
+        response = await axios.get(url, {
+          timeout: 15000,
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
           }
         });
-        
-        // Add only a few new links to avoid overwhelming the server
-        queue.push(...newLinks.slice(0, 5));
+        success = true;
+      } catch (e) {
+        attempt++;
+        // Retry only for socket hang up or network errors
+        const isHangup = e.code === 'ECONNRESET' || (e.message && e.message.includes('socket hang up'));
+        const isNetwork = e.code === 'ECONNABORTED' || e.code === 'ENOTFOUND' || e.code === 'EAI_AGAIN';
+        if ((isHangup || isNetwork) && attempt < 3) {
+          logger.warn(`Retrying (${attempt}/3) for ${url} due to network error: ${e.message}`);
+          await sleep(1500 * attempt); // Exponential backoff
+        } else {
+          logger.warn(`Error scraping ${url}: ${e.message}`);
+          break;
+        }
       }
-    } catch (e) {
-      logger.warn(`Error scraping ${url}: ${e.message}`);
-      continue;
+    }
+    if (!success) continue;
+
+    const $ = cheerio.load(response.data);
+    $('script, style, nav, footer, header').remove();
+    const text = $('body').text().trim().replace(/\s+/g, ' ');
+    const title = $('title').text().trim() || $('h1').first().text().trim() || 'Untitled';
+    if (text.length > 100) {
+      data.pages.push({ 
+        url, 
+        title, 
+        text: text.substring(0, 5000) // Limit text length to avoid huge cache files
+      });
+    }
+    if (data.pages.length < maxPages) {
+      const newLinks = [];
+      $('a[href]').each((i, el) => {
+        const href = $(el).attr('href');
+        if (href && !href.startsWith('mailto') && !href.startsWith('#') && !href.startsWith('javascript:')) {
+          try {
+            const absoluteUrl = urlModule.resolve(url, href);
+            if (absoluteUrl.startsWith(rootUrl) && !visitedUrls.has(absoluteUrl)) {
+              newLinks.push(absoluteUrl);
+            }
+          } catch (e) {
+            // Skip invalid URLs
+          }
+        }
+      });
+      queue.push(...newLinks.slice(0, 5));
     }
   }
 

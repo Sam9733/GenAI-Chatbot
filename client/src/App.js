@@ -176,7 +176,16 @@ function App() {
   };
 
   const handleImproveClick = () => {
-    setShowImproveOptions(!showImproveOptions);
+    setShowImproveOptions((prev) => {
+      const next = !prev;
+      if (!prev) {
+        // If opening the improve options, scroll to bottom
+        setTimeout(() => {
+          scrollToBottom();
+        }, 0);
+      }
+      return next;
+    });
   };
 
   const handleQuickImprove = (type) => {
