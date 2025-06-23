@@ -321,6 +321,62 @@ router.get('/last-conversation', async (req, res) => {
   }
 });
 
+// Endpoint for improving the last response
+router.post('/improve', async (req, res) => {
+  try {
+    const { improvementRequest } = req.body;
+    
+    if (!improvementRequest || typeof improvementRequest !== 'string') {
+      return res.status(400).json({ error: 'Improvement request is required and must be a string' });
+    }
+    
+    // Get the last conversation from MongoDB
+    const lastConversationDoc = await GitLabData.findOne({ source: 'last_conversation' });
+    if (!lastConversationDoc) {
+      return res.status(400).json({ error: 'No previous conversation to improve' });
+    }
+    
+    const lastConversation = JSON.parse(lastConversationDoc.content);
+    if (!lastConversation.userMessage || !lastConversation.botResponse) {
+      return res.status(400).json({ error: 'Invalid previous conversation data' });
+    }
+    
+    const improvedResponse = await generateResponse(
+      lastConversation.userMessage, 
+      lastConversation.context, 
+      improvementRequest
+    );
+    
+    // Update the conversation with the improved response in MongoDB
+    await GitLabData.findOneAndUpdate(
+      { source: 'last_conversation' },
+      {
+        content: JSON.stringify({
+          ...lastConversation,
+          botResponse: improvedResponse,
+          timestamp: new Date().toISOString()
+        })
+      },
+      { upsert: true }
+    );
+    
+    res.json({
+      id: Date.now().toString(),
+      message: improvedResponse,
+      timestamp: new Date().toISOString(),
+      conversationId: Date.now().toString(),
+      sources: {
+        handbook: lastConversation.context.handbook ? GITLAB_SOURCES.handbook : null,
+        direction: lastConversation.context.direction ? GITLAB_SOURCES.direction : null,
+        lastUpdated: lastConversation.context.lastUpdated
+      }
+    });
+  } catch (err) {
+    logger.error('Error improving response:', err);
+    res.status(500).json({ error: 'Failed to improve response', message: err.message });
+  }
+});
+
 router.get('/health', async (req, res) => {
   try {
     const data = await getGitLabData();
