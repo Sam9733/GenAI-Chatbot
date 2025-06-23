@@ -61,7 +61,7 @@ async function scrapeGitLabData() {
   }
 }
 
-async function scrapeAndSaveSite(rootUrl, source, maxPages = 200, batchSize = 10) {
+async function scrapeAndSaveSite(rootUrl, source, maxPages = 100, batchSize = 10) {
   logger.info(`Starting to scrape: ${rootUrl} (max ${maxPages} pages)`);
   const visitedUrls = new Set();
   const queue = [rootUrl];
