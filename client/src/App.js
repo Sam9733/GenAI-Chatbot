@@ -23,8 +23,7 @@ function App() {
   const [error, setError] = useState(null);
   const [systemStatus, setSystemStatus] = useState(null);
   const [showStatus, setShowStatus] = useState(false);
-  const [showImproveOptions, setShowImproveOptions] = useState(false);
-  const [improvementRequest, setImprovementRequest] = useState('');
+  const [conversationId, setConversationId] = useState(null);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -72,8 +71,11 @@ function App() {
     try {
       const response = await axios.post(config.getApiUrl('/api/chat/message'), {
         message: userMessage.text,
-        conversationId: Date.now().toString()
+        conversationId: conversationId 
       });
+
+      // Update conversation ID from response to maintain session
+      setConversationId(response.data.conversationId);
 
       const botMessage = {
         id: response.data.id,
@@ -124,66 +126,12 @@ function App() {
   const clearChat = () => {
     setMessages([]);
     setError(null);
+    setConversationId(null); // Reset conversation on clear
   };
 
   const handleInfoClick = () => {
     setShowStatus((prev) => !prev);
     if (!showStatus) checkSystemHealth();
-  };
-
-  const improveResponse = async (request) => {
-    try {
-      setIsLoading(true);
-      setError(null);
-      
-      const response = await axios.post(config.getApiUrl('/api/chat/improve'), {
-        improvementRequest: request
-      });
-
-      const improvedMessage = {
-        id: response.data.id,
-        text: response.data.message,
-        sender: 'bot',
-        timestamp: response.data.timestamp,
-        sources: response.data.sources,
-        isImproved: true
-      };
-
-      // Replace the last bot message with the improved one
-      setMessages(prev => {
-        const newMessages = [...prev];
-        // Find and replace the last bot message
-        for (let i = newMessages.length - 1; i >= 0; i--) {
-          if (newMessages[i].sender === 'bot') {
-            newMessages[i] = improvedMessage;
-            break;
-          }
-        }
-        return newMessages;
-      });
-
-      setShowImproveOptions(false);
-      setImprovementRequest('');
-    } catch (error) {
-      logger.error('Error improving response:', error);
-      setError(error.response?.data?.message || 'Failed to improve response. Please try again.');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleImproveClick = () => {
-    setShowImproveOptions(!showImproveOptions);
-  };
-
-  const handleQuickImprove = (type) => {
-    const requests = {
-      'more-detail': 'Please provide more detail and specific examples.',
-      'simpler': 'Please explain this in simpler terms.',
-      'shorter': 'Please provide a more concise answer.',
-      'longer': 'Please provide a more comprehensive explanation.'
-    };
-    improveResponse(requests[type]);
   };
 
   return (
@@ -256,7 +204,7 @@ function App() {
           {messages.map((message, index) => (
             <div 
               key={message.id} 
-              className={`message ${message.sender} ${message.isError ? 'error' : ''} ${message.isImproved ? 'improved' : ''} fade-in`}
+              className={`message ${message.sender} ${message.isError ? 'error' : ''} fade-in`}
             >
               <div className="message-avatar">
                 {message.sender === 'user' ? <User /> : <Bot />}
@@ -270,58 +218,10 @@ function App() {
                 )}
                 <div className="message-timestamp">
                   {new Date(message.timestamp).toLocaleTimeString()}
-                  {message.isImproved && <span className="improved-badge">✓ Improved</span>}
                 </div>
-                {message.sender === 'bot' && index === messages.length - 1 && !isLoading && (
-                  <div className="message-actions">
-                    <button 
-                      className="improve-btn"
-                      onClick={handleImproveClick}
-                      title="Improve this response"
-                    >
-                      <Edit3 size={16} />
-                      Improve
-                    </button>
-                  </div>
-                )}
               </div>
             </div>
           ))}
-          
-          {showImproveOptions && (
-            <div className="improve-options fade-in">
-              <div className="improve-header">
-                <h4>Improve the last response:</h4>
-                <button 
-                  className="close-improve-btn"
-                  onClick={() => setShowImproveOptions(false)}
-                >
-                  ×
-                </button>
-              </div>
-              <div className="quick-improve-buttons">
-                <button onClick={() => handleQuickImprove('more-detail')}>More Detail</button>
-                <button onClick={() => handleQuickImprove('simpler')}>Simpler</button>
-                <button onClick={() => handleQuickImprove('shorter')}>Shorter</button>
-                <button onClick={() => handleQuickImprove('longer')}>Longer</button>
-              </div>
-              <div className="custom-improve">
-                <textarea
-                  value={improvementRequest}
-                  onChange={(e) => setImprovementRequest(e.target.value)}
-                  placeholder="Describe how you'd like to improve this response..."
-                  rows="2"
-                />
-                <button 
-                  onClick={() => improveResponse(improvementRequest)}
-                  disabled={!improvementRequest.trim() || isLoading}
-                >
-                  <MessageSquare size={16} />
-                  Send Improvement Request
-                </button>
-              </div>
-            </div>
-          )}
           
           {isLoading && (
             <div className="message bot loading fade-in">
