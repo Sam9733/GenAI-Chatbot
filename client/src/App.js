@@ -192,8 +192,7 @@ function App() {
     const requests = {
       'more-detail': 'Please provide more detail and specific examples.',
       'simpler': 'Please explain this in simpler terms.',
-      'shorter': 'Please provide a more concise answer.',
-      'longer': 'Please provide a more comprehensive explanation.'
+      'shorter': 'Please provide a more concise answer.'
     };
     improveResponse(requests[type]);
   };
@@ -315,7 +314,6 @@ function App() {
                 <button onClick={() => handleQuickImprove('more-detail')}>More Detail</button>
                 <button onClick={() => handleQuickImprove('simpler')}>Simpler</button>
                 <button onClick={() => handleQuickImprove('shorter')}>Shorter</button>
-                <button onClick={() => handleQuickImprove('longer')}>Longer</button>
               </div>
               <div className="custom-improve">
                 <textarea

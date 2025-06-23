@@ -203,7 +203,36 @@ async function generateResponse(userMessage, context, improvementRequest = null)
   const handbookText = (handbook.pages || []).map(p => p.text).join(' ').slice(0, 10000);
   const directionText = (direction.pages || []).map(p => p.text).join(' ').slice(0, 10000);
 
-  let prompt = `
+  let prompt;
+  if (improvementRequest) {
+    prompt = `
+You are a thoughtful and articulate AI assistant trained on GitLab's official public documentation.
+
+The user has requested an improvement to your previous response. Here's the context:
+
+Previous User Question: ${userMessage}
+User's Improvement Request: ${improvementRequest}
+
+Please provide an improved response that addresses the user's feedback. You must follow these guidelines:
+
+1. Write in clear, plain English — like you're talking to a colleague or explaining to a curious user.
+2. Do NOT use any formatting symbols like asterisks (*), underscores (_), hashtags (#), bullet points, or Markdown/HTML. Just write natural sentences and paragraphs.
+3. Do not list items with numbers or dashes — explain them smoothly in paragraph form.
+4. Avoid robotic or overly formal language. Be helpful and conversational.
+5. If the answer is not found in the documentation, say so clearly and suggest visiting the official GitLab Handbook or Direction pages for more information.
+
+Reference content:
+
+GitLab Handbook Snippet:
+${handbookText}
+
+GitLab Direction Snippet:
+${directionText}
+
+Now provide your improved response in natural language:
+`;
+  } else {
+    prompt = `
 You are a thoughtful and articulate AI assistant trained on GitLab's official public documentation, including the GitLab Handbook and Direction pages.
 
 Your role is to answer the user's question using only the context provided below. You must follow these guidelines strictly:
@@ -227,40 +256,15 @@ ${userMessage}
 
 Now write your complete answer in natural language:
 `;
-
-  // If this is an improvement request, include the previous response and feedback
-  if (improvementRequest && lastConversation.botResponse) {
-    prompt = `
-You are a thoughtful and articulate AI assistant trained on GitLab's official public documentation.
-
-The user has requested an improvement to your previous response. Here's the context:
-
-Previous User Question: ${lastConversation.userMessage}
-Previous Bot Response: ${lastConversation.botResponse}
-User's Improvement Request: ${improvementRequest}
-
-Please provide an improved response that addresses the user's feedback. You must follow these guidelines:
-
-1. Write in clear, plain English — like you're talking to a colleague or explaining to a curious user.
-2. Do NOT use any formatting symbols like asterisks (*), underscores (_), hashtags (#), bullet points, or Markdown/HTML. Just write natural sentences and paragraphs.
-3. Do not list items with numbers or dashes — explain them smoothly in paragraph form.
-4. Avoid robotic or overly formal language. Be helpful and conversational.
-5. If the answer is not found in the documentation, say so clearly and suggest visiting the official GitLab Handbook or Direction pages for more information.
-
-Reference content:
-
-GitLab Handbook Snippet:
-${handbookText}
-
-GitLab Direction Snippet:
-${directionText}
-
-Now provide your improved response in natural language:
-`;
   }
 
-  const result = await model.generateContent(prompt);
-  return result.response.text();
+  try {
+    const result = await model.generateContent(prompt);
+    return result.response.text();
+  } catch (error) {
+    logger.error('Error generating response:', error);
+    throw new Error('Failed to generate response from AI model');
+  }
 }
 
 router.post('/message', async (req, res) => {
