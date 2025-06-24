@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
 import { Send, Bot, User, RefreshCw, Info, Gitlab, Edit3, MessageSquare } from 'lucide-react';
 import config from './config';
@@ -30,6 +30,29 @@ function App() {
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
 
+  const checkSystemHealth = useCallback(async () => {
+    try {
+      setIsStatusLoading(true);
+      setSystemStatus(null); // Reset previous status while loading
+      
+      const response = await axios.get(config.getApiUrl('/api/chat/health'), {
+        timeout: 5000 // 5 second timeout
+      });
+      
+      setSystemStatus(response.data);
+    } catch (error) {
+      logger.error('Health check failed:', error);
+      setSystemStatus({ 
+        status: 'unhealthy', 
+        error: error.code === 'ECONNABORTED' 
+          ? 'Request timed out' 
+          : error.message 
+      });
+    } finally {
+      setIsStatusLoading(false);
+    }
+  }, []);
+
   // Auto-scroll to bottom when new messages arrive
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -45,20 +68,7 @@ function App() {
   // Check system health on component mount
   useEffect(() => {
     checkSystemHealth();
-  }, []);
-
-  const checkSystemHealth = async () => {
-    try {
-      setIsStatusLoading(true);
-      const response = await axios.get(config.getApiUrl('/api/chat/health'));
-      setSystemStatus(response.data);
-    } catch (error) {
-      logger.error('Health check failed:', error);
-      setSystemStatus({ status: 'unhealthy', error: error.message });
-    } finally {
-      setIsStatusLoading(false);
-    }
-  };
+  }, [checkSystemHealth]);
 
   const sendMessage = async (e) => {
     e.preventDefault();
@@ -141,8 +151,11 @@ function App() {
   };
 
   const handleInfoClick = () => {
-    setShowStatus((prev) => !prev);
-    if (!showStatus) checkSystemHealth();
+    const newShowStatus = !showStatus;
+    setShowStatus(newShowStatus);
+    if (newShowStatus) {
+      checkSystemHealth();
+    }
   };
 
   const improveResponse = async (request) => {
@@ -238,7 +251,7 @@ function App() {
         </div>
         {showStatus && (
           <div className={`status-bar custom-status-bar ${systemStatus?.status || 'loading'}`}>
-            {isStatusLoading ? (
+            {isStatusLoading || systemStatus === null ? (
               <span>Fetching status...</span>
             ) : (
               <>
@@ -251,6 +264,9 @@ function App() {
                 )}
                 {systemStatus?.refreshStatus && (
                   <span>• Refreshing: {systemStatus.refreshStatus.isRefreshing ? 'Yes' : 'No'}</span>
+                )}
+                {systemStatus?.memory && (
+                  <span>• Memory: {systemStatus.memory.heapUsed}MB / {systemStatus.memory.heapTotal}MB ({systemStatus.memory.status})</span>
                 )}
                 {systemStatus?.refreshStatus && systemStatus.refreshStatus.lastRefreshError && (
                   <span style={{ color: '#dc2626' }}>• Refresh Error: {systemStatus.refreshStatus.lastRefreshError}</span>

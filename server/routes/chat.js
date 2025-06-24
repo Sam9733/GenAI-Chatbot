@@ -496,10 +496,35 @@ router.post('/improve', async (req, res) => {
 });
 
 router.get('/health', async (req, res) => {
+  // Add timeout handling
+  const TIMEOUT_MS = 5000; // 5 seconds timeout
+  const timeoutPromise = new Promise((_, reject) => {
+    setTimeout(() => reject(new Error('Health check timed out')), TIMEOUT_MS);
+  });
+
   try {
+    // Race between the health check and timeout
+    await Promise.race([
+      timeoutPromise,
+      Promise.resolve() // Immediate resolution to start health check
+    ]);
+
     const data = await getGitLabData();
+    
+    // Get memory usage in MB
+    const memUsage = process.memoryUsage();
+    const memoryInfo = {
+      heapUsed: Math.round(memUsage.heapUsed / 1024 / 1024),
+      heapTotal: Math.round(memUsage.heapTotal / 1024 / 1024),
+      rss: Math.round(memUsage.rss / 1024 / 1024),
+      external: Math.round(memUsage.external / 1024 / 1024)
+    };
+
+    // Check if memory usage is concerning
+    const isMemoryHigh = memoryInfo.heapUsed > (memoryInfo.heapTotal * 0.9); // Warning if heap usage > 90%
+
     res.json({
-      status: 'healthy',
+      status: isMemoryHigh ? 'warning' : 'healthy',
       database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
       geminiApi: genAI ? 'configured' : 'missing',
       gitlabData: {
@@ -513,10 +538,20 @@ router.get('/health', async (req, res) => {
         lastRefreshError: refreshStatus.lastRefreshError,
         startTime: refreshStatus.startTime
       },
+      memory: {
+        ...memoryInfo,
+        status: isMemoryHigh ? 'warning' : 'normal',
+        unit: 'MB'
+      },
       timestamp: new Date().toISOString()
     });
   } catch (err) {
-    res.status(500).json({ status: 'unhealthy', error: err.message });
+    logger.error('Health check failed:', err);
+    res.status(err.message === 'Health check timed out' ? 503 : 500).json({ 
+      status: 'unhealthy', 
+      error: err.message,
+      timestamp: new Date().toISOString()
+    });
   }
 });
 
