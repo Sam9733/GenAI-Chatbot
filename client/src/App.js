@@ -20,11 +20,13 @@ function App() {
   const [messages, setMessages] = useState([]);
   const [inputMessage, setInputMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState(null);
   const [systemStatus, setSystemStatus] = useState(null);
   const [showStatus, setShowStatus] = useState(false);
   const [showImproveOptions, setShowImproveOptions] = useState(false);
   const [improvementRequest, setImprovementRequest] = useState('');
+  const [isStatusLoading, setIsStatusLoading] = useState(false);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -47,11 +49,14 @@ function App() {
 
   const checkSystemHealth = async () => {
     try {
+      setIsStatusLoading(true);
       const response = await axios.get(config.getApiUrl('/api/chat/health'));
       setSystemStatus(response.data);
     } catch (error) {
       logger.error('Health check failed:', error);
       setSystemStatus({ status: 'unhealthy', error: error.message });
+    } finally {
+      setIsStatusLoading(false);
     }
   };
 
@@ -113,14 +118,20 @@ function App() {
 
   const refreshData = async () => {
     try {
-      setIsLoading(true);
-      await axios.post(config.getApiUrl('/api/chat/refresh-data'));
+      setIsRefreshing(true);
+      const response = await axios.post(config.getApiUrl('/api/chat/refresh-data'));
+      
+      if (response.data.message.includes('already in progress')) {
+        setError('Refresh already in progress by another user. Please wait.');
+      } else {
+        setError(null);
+      }
+      
       await checkSystemHealth();
-      setError(null);
     } catch (error) {
-      setError('Failed to refresh data');
+      setError('Failed to refresh data: ' + (error.response?.data?.message || error.message));
     } finally {
-      setIsLoading(false);
+      setIsRefreshing(false);
     }
   };
 
@@ -210,34 +221,41 @@ function App() {
             <button 
               className="refresh-btn" 
               onClick={refreshData}
-              disabled={isLoading}
+              disabled={isRefreshing}
               title="Refresh GitLab data"
             >
-              <RefreshCw className={isLoading ? 'spinning' : ''} />
+              <RefreshCw className={isRefreshing ? 'spinning' : ''} />
             </button>
             <button 
               className="info-btn" 
               onClick={handleInfoClick}
               title="System status"
+              disabled={isStatusLoading}
             >
               <Info />
             </button>
           </div>
         </div>
-        {showStatus && systemStatus && (
-          <div className={`status-bar custom-status-bar ${systemStatus.status}`}>
-            <span>Status: {systemStatus.status}</span>
-            {systemStatus.geminiApi && (
-              <span>• Gemini API: {systemStatus.geminiApi}</span>
-            )}
-            {systemStatus.gitlabData && (
-              <span>• GitLab Data: {systemStatus.gitlabData.handbook}</span>
-            )}
-            {systemStatus.refreshStatus && (
-              <span>• Refreshing: {systemStatus.refreshStatus.isRefreshing ? 'Yes' : 'No'}</span>
-            )}
-            {systemStatus.refreshStatus && systemStatus.refreshStatus.lastRefreshError && (
-              <span style={{ color: '#dc2626' }}>• Refresh Error: {systemStatus.refreshStatus.lastRefreshError}</span>
+        {showStatus && (
+          <div className={`status-bar custom-status-bar ${systemStatus?.status || 'loading'}`}>
+            {isStatusLoading ? (
+              <span>Fetching status...</span>
+            ) : (
+              <>
+                <span>Status: {systemStatus?.status || 'unknown'}</span>
+                {systemStatus?.geminiApi && (
+                  <span>• Gemini API: {systemStatus.geminiApi}</span>
+                )}
+                {systemStatus?.gitlabData && (
+                  <span>• GitLab Data: {systemStatus.gitlabData.handbook}</span>
+                )}
+                {systemStatus?.refreshStatus && (
+                  <span>• Refreshing: {systemStatus.refreshStatus.isRefreshing ? 'Yes' : 'No'}</span>
+                )}
+                {systemStatus?.refreshStatus && systemStatus.refreshStatus.lastRefreshError && (
+                  <span style={{ color: '#dc2626' }}>• Refresh Error: {systemStatus.refreshStatus.lastRefreshError}</span>
+                )}
+              </>
             )}
           </div>
         )}

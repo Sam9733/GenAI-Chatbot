@@ -37,32 +37,76 @@ const GITLAB_SOURCES = {
 let refreshStatus = {
   isRefreshing: false,
   lastRefreshAttempt: null,
-  lastRefreshError: null
+  lastRefreshError: null,
+  startTime: null
 };
 
 async function scrapeGitLabData() {
   try {
     logger.info('Starting GitLab data scraping...');
     
-    // Clear existing data before starting new scrape
-    logger.info('Clearing existing data from database...');
-    await GitLabData.updateMany(
-      { source: { $in: ['handbook', 'direction'] } },
-      { $set: { content: JSON.stringify({ title: '', url: '', pages: [] }) } }
-    );
-    logger.info('Existing data cleared successfully.');
+    // Instead of clearing existing data, we'll use a staging approach
+    // Create temporary documents with new data, then swap them in
+    logger.info('Starting staged refresh - preparing new data...');
     
-    await scrapeAndSaveSite(GITLAB_SOURCES.handbook, 'handbook');
-    await scrapeAndSaveSite(GITLAB_SOURCES.direction, 'direction');
-    logger.info('Scraping completed for all sites.');
+    await scrapeAndSaveSite(GITLAB_SOURCES.handbook, 'handbook_staging');
+    await scrapeAndSaveSite(GITLAB_SOURCES.direction, 'direction_staging');
+    
+    // Now atomically swap the staging data to production
+    logger.info('Swapping staged data to production...');
+    
+    // Use MongoDB transactions to ensure atomicity
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        // Copy staging data to production
+        const handbookStaging = await GitLabData.findOne({ source: 'handbook_staging' });
+        const directionStaging = await GitLabData.findOne({ source: 'direction_staging' });
+        
+        if (handbookStaging) {
+          await GitLabData.findOneAndUpdate(
+            { source: 'handbook' },
+            { 
+              content: handbookStaging.content,
+              scrapedAt: new Date()
+            },
+            { upsert: true, session }
+          );
+        }
+        
+        if (directionStaging) {
+          await GitLabData.findOneAndUpdate(
+            { source: 'direction' },
+            { 
+              content: directionStaging.content,
+              scrapedAt: new Date()
+            },
+            { upsert: true, session }
+          );
+        }
+        
+        // Clean up staging data
+        await GitLabData.deleteMany({ source: { $in: ['handbook_staging', 'direction_staging'] } }, { session });
+      });
+    } finally {
+      await session.endSession();
+    }
+    
+    logger.info('Scraping completed for all sites with atomic swap.');
   } catch (error) {
     logger.error('Error in scrapeGitLabData:', error);
+    // Clean up any staging data on error
+    try {
+      await GitLabData.deleteMany({ source: { $in: ['handbook_staging', 'direction_staging'] } });
+    } catch (cleanupError) {
+      logger.error('Error cleaning up staging data:', cleanupError);
+    }
     throw error;
   }
 }
 
 async function scrapeAndSaveSite(rootUrl, source, maxPages = 100, batchSize = 10) {
-  logger.info(`Starting to scrape: ${rootUrl} (max ${maxPages} pages)`);
+  logger.info(`Starting to scrape: ${rootUrl} (max ${maxPages} pages) for source: ${source}`);
   const visitedUrls = new Set();
   const queue = [rootUrl];
   let currentBatch = [];
@@ -122,7 +166,7 @@ async function scrapeAndSaveSite(rootUrl, source, maxPages = 100, batchSize = 10
       currentBatch.push({ 
         url, 
         title, 
-        text: text.substring(0, 5000) // Limit text length to avoid huge cache files
+        text: text.substring(0, 5000)
       });
 
       // Save batch if we've reached batchSize or this is the last page
@@ -204,27 +248,39 @@ async function scrapeAndSaveSite(rootUrl, source, maxPages = 100, batchSize = 10
     }
   }
 
-  logger.info(`Finished scraping ${rootUrl}. Total pages saved: ${totalPagesSaved}`);
+  logger.info(`Finished scraping ${rootUrl} for ${source}. Total pages saved: ${totalPagesSaved}`);
 }
 
 // Background refresh function
 async function backgroundRefresh() {
   if (refreshStatus.isRefreshing) {
     logger.info('Refresh already in progress, skipping...');
-    return;
+    return { 
+      success: false, 
+      message: 'Refresh already in progress'
+    };
   }
 
   refreshStatus.isRefreshing = true;
   refreshStatus.lastRefreshAttempt = new Date().toISOString();
   refreshStatus.lastRefreshError = null;
+  refreshStatus.startTime = new Date().toISOString();
 
   try {
     logger.info('Starting background refresh...');
     await scrapeGitLabData();
     logger.info('Background refresh completed successfully');
+    return { 
+      success: true, 
+      message: 'Refresh completed successfully'
+    };
   } catch (error) {
     logger.error('Background refresh failed:', error);
     refreshStatus.lastRefreshError = error.message;
+    return { 
+      success: false, 
+      message: 'Refresh failed: ' + error.message
+    };
   } finally {
     refreshStatus.isRefreshing = false;
   }
@@ -456,7 +512,8 @@ router.get('/health', async (req, res) => {
       refreshStatus: {
         isRefreshing: refreshStatus.isRefreshing,
         lastRefreshAttempt: refreshStatus.lastRefreshAttempt,
-        lastRefreshError: refreshStatus.lastRefreshError
+        lastRefreshError: refreshStatus.lastRefreshError,
+        startTime: refreshStatus.startTime
       },
       timestamp: new Date().toISOString()
     });
@@ -468,15 +525,14 @@ router.get('/health', async (req, res) => {
 router.post('/refresh-data', async (req, res) => {
   try {
     // Start background refresh and return immediately
-    backgroundRefresh().catch(err => {
-      console.error('Manual refresh failed:', err);
-    });
+    const result = await backgroundRefresh();
     
     res.json({ 
-      message: 'GitLab data refresh started in background', 
+      message: result.success ? 'GitLab data refresh started in background' : result.message,
       refreshStatus: {
         isRefreshing: refreshStatus.isRefreshing,
-        lastRefreshAttempt: refreshStatus.lastRefreshAttempt
+        lastRefreshAttempt: refreshStatus.lastRefreshAttempt,
+        startTime: refreshStatus.startTime
       },
       timestamp: new Date().toISOString()
     });
