@@ -289,24 +289,22 @@ async function backgroundRefresh() {
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function getGitLabData() {
-  const handbookDoc = await GitLabData.findOne({ source: 'handbook' });
-  const directionDoc = await GitLabData.findOne({ source: 'direction' });
+  const handbookDoc = await GitLabData.findOne({ source: 'handbook' }).select('scrapedAt');
+  const directionDoc = await GitLabData.findOne({ source: 'direction' }).select('scrapedAt');
 
   const dataFromDB = {
-    handbook: handbookDoc ? JSON.parse(handbookDoc.content) : null,
-    direction: directionDoc ? JSON.parse(directionDoc.content) : null,
-    lastUpdated: handbookDoc ? handbookDoc.scrapedAt : null,
+    handbook: !!handbookDoc,
+    direction: !!directionDoc,
+    lastUpdated: handbookDoc ? handbookDoc.scrapedAt : (directionDoc ? directionDoc.scrapedAt : null),
   };
-
+  
+  // This function should only GET data, not trigger a refresh.
+  // The refresh logic is handled by the /refresh-data endpoint.
   const now = new Date();
   const age = dataFromDB.lastUpdated ? now - new Date(dataFromDB.lastUpdated) : Infinity;
   
-  // Check if we need to refresh (but don't block)
-  if (age > 12*3600000 || !dataFromDB.handbook) {
-    logger.info('Data from DB is stale or missing, triggering background refresh...');
-    backgroundRefresh().catch(err => {
-      logger.error('Background refresh failed:', err);
-    });
+  if (age > 12 * 3600000) {
+    logger.warn('Data in the database is stale. A manual refresh is recommended.');
   }
   
   return dataFromDB;
