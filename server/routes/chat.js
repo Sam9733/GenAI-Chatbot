@@ -105,7 +105,7 @@ async function scrapeGitLabData() {
   }
 }
 
-async function scrapeAndSaveSite(rootUrl, source, maxPages = 100, batchSize = 10) {
+async function scrapeAndSaveSite(rootUrl, source, maxPages = 50, batchSize = 10) {
   logger.info(`Starting to scrape: ${rootUrl} (max ${maxPages} pages) for source: ${source}`);
   const visitedUrls = new Set();
   const queue = [rootUrl];
@@ -496,18 +496,7 @@ router.post('/improve', async (req, res) => {
 });
 
 router.get('/health', async (req, res) => {
-  // Add timeout handling
-  const TIMEOUT_MS = 5000; // 5 seconds timeout
-  const timeoutPromise = new Promise((_, reject) => {
-    setTimeout(() => reject(new Error('Health check timed out')), TIMEOUT_MS);
-  });
-
   try {
-    // Race between the health check and timeout
-    await Promise.race([
-      timeoutPromise,
-      Promise.resolve() // Immediate resolution to start health check
-    ]);
 
     const data = await getGitLabData();
     
@@ -547,7 +536,7 @@ router.get('/health', async (req, res) => {
     });
   } catch (err) {
     logger.error('Health check failed:', err);
-    res.status(err.message === 'Health check timed out' ? 503 : 500).json({ 
+    res.status(500).json({
       status: 'unhealthy', 
       error: err.message,
       timestamp: new Date().toISOString()
@@ -557,7 +546,7 @@ router.get('/health', async (req, res) => {
 
 router.post('/refresh-data', async (req, res) => {
   try {
-    // Start background refresh and return immediately
+    // Start background refresh
     const result = await backgroundRefresh();
     
     res.json({ 
